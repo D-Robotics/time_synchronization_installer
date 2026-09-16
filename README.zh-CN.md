@@ -107,24 +107,28 @@ GNSS 接收机
 ./time_synchronization_installer.sh slave --time-stamping hardware
 
 # 之后这块板子改成对外提供 GNSS 时间。只改角色，网口、模式等等都沿用。
-# ./gnss/refclock.conf 是给这台接收机写的配方，见下文"GNSS 配方文件"：
-timesync master --refclock-file ./gnss/refclock.conf --gps-device /dev/pps0 \
+# master 需要一份 GNSS 配方：一段描述这台接收机的 chrony 配置。从仓库里的模板
+# 抄一份，按自己的硬件改：
+cp gnss/refclock.example.conf gnss/refclock.conf
+$EDITOR gnss/refclock.conf
+timesync master --refclock-file gnss/refclock.conf --gps-device /dev/pps0 \
                 --advertise-gnss-quality
 
 # 产线出货门禁：
 timesync verify
 ```
 
-角色名就是命令，这就是全部接口。没有单独的安装步骤，也没有 `install`/`switch` 两个动词
-要选。`1` 和 `2` 仍然接受，连当命令本身也行，并且在拼任何消息之前就换成词。
+角色名就是命令，这就是全部接口。`1` 和 `2` 仍然接受，连当命令本身也行，并且在拼任何消息
+之前就换成词。
 
 ## GNSS 配方文件
 
 `--refclock-file` 收的是一段 **chrony 配置片段**：告诉 chrony 这台机器的 GNSS 接收机在哪
 儿的 `refclock` 行。这是本工具唯一没法替你写的东西，因为它取决于接收机而不是板子——接收机
 以什么形式出现（`/dev/pps0`、经 gpsd 走 SHM 的串口、某个 PHC 索引），以及那个型号需要什
-么参数。你的文件会原样装成 `/etc/chrony/conf.d/20-ptp-refclock.conf`。工具只检查两件事：
-文件读得出来，以及里面提到了你给的 `--gps-device`。
+么参数。你的文件会原样装成 `/etc/chrony/conf.d/20-ptp-refclock.conf`。工具只检查三件事：文件读得
+出来、里面有 `refclock` 行、以及里面提到了你给的 `--gps-device`。最后这条也是为什么纯
+gpsd/SHM 的配方（它本身不提串口）应该把串口写在一行注释里——模板里写了位置。
 
 一台带 PPS 输出、NMEA 经 gpsd 走 SHM 的接收机：
 
@@ -133,6 +137,9 @@ timesync verify
 refclock SHM 0 refid GPS  precision 1e-1 offset 0.0 delay 0.2
 refclock PPS /dev/pps0 refid PPS  lock GPS prefer
 ```
+
+这个文件不用从零憋：仓库里带了一份写好注释的 **`gnss/refclock.example.conf`**。抄一份，留下
+与你的接收机相符的行，删掉其余的，再把设备名改对。每行都有注释说明。
 
 你的配方从哪儿来：
 
@@ -514,9 +521,5 @@ Sep 16 18:02:35.403621 ubuntu phc2sys[2713]: [19.033] Waiting for ptp4l...
   `/lib/systemd/system/` 下的那份，这里是必需的：包里的 unit 把配置路径写死了，而且没有
   `Restart=`。代价是以后 `linuxptp` 包更新那两个 unit 时不会生效；文件很短，如果在意的
   话，升级后 diff 一下。
-- **没有 `install`，也没有 `switch` 这两个动词了。** 照着 1.1.0 写的说明可能还写着
-  `timesync install slave` 或 `timesync switch master`。两个动词都取消了：角色名就是命令。
-  敲下去会得到一行指向新写法的提示，而不是一整屏 usage，所以手里拿着上个月说明书的现场
-  人员不用猜是不是工具坏了。
 - **每个角色、每种模式下 `CLOCK_REALTIME` 只有一个属主。** 改这里任何东西时，这条不变量
   要守住。

@@ -97,9 +97,10 @@
 #   # (only where the NIC and its driver really do hardware-stamp):
 #   sudo ./time_synchronization_installer.sh slave --time-stamping hardware
 #
-#   # the master role, on a machine with a GNSS recipe validated on a bench unit.
-#   # The recipe is a chrony snippet for this receiver -- see --refclock-file
-#   # under "options", and keep the reviewed file in your deployment repo:
+#   # the master role.  It needs a GNSS recipe -- a chrony snippet for this
+#   # receiver, started from gnss/refclock.example.conf and validated on a bench
+#   # unit (see --refclock-file under "options"):
+#   cp gnss/refclock.example.conf gnss/refclock.conf   # then edit it
 #   sudo ./time_synchronization_installer.sh master \
 #        --refclock-file ./gnss/refclock.conf --gps-device /dev/ttyS0 \
 #        --advertise-gnss-quality
@@ -311,14 +312,20 @@ options
                          where the receiver is, e.g.
                              refclock SHM 0 refid GPS precision 1e-1 offset 0.0
                              refclock PPS /dev/pps0 refid PPS lock GPS prefer
-                         You get it from the receiver's documentation (then fix
-                         the device names for this board's wiring), or from
-                         /etc/chrony/conf.d/ on a bench unit where the same
-                         receiver already works.  Nothing is generated for you:
-                         it depends on the receiver model.  Installed verbatim
-                         as /etc/chrony/conf.d/20-ptp-refclock.conf; the only
-                         checks are that F is readable and that it mentions
-                         --gps-device.
+                         The repository this script ships in carries a
+                         commented starting point, gnss/refclock.example.conf:
+                         copy it and keep only the lines that match your
+                         receiver.  The real values come from the receiver's
+                         documentation (then fix the device names for this
+                         board's wiring), or from /etc/chrony/conf.d/ on a
+                         bench unit where the same receiver already works --
+                         the better source, since it is known to work with your
+                         driver stack.  Nothing is generated for you: it
+                         depends on the receiver model.  Installed verbatim as
+                         /etc/chrony/conf.d/20-ptp-refclock.conf.  The only
+                         checks are that F is readable, holds a refclock line,
+                         and mentions --gps-device (which is why a gpsd/SHM
+                         recipe should name its serial port in a comment).
                          Validate one recipe on one bench unit (`chronyc
                          sources -v`, `chronyc tracking`), review it, then
                          deploy that same reviewed file to the whole fleet.

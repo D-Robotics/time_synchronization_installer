@@ -119,19 +119,21 @@ On the board, as root:
 ./time_synchronization_installer.sh slave --time-stamping hardware
 
 # Later, this board serves GNSS time instead.  The role is the only thing that
-# changes; the interface, the mode and the rest carry over.  ./gnss/refclock.conf
-# is your snippet for this receiver -- see "The GNSS recipe file" below:
-timesync master --refclock-file ./gnss/refclock.conf --gps-device /dev/pps0 \
+# changes; the interface, the mode and the rest carry over.  The master role
+# needs a GNSS recipe: a chrony snippet describing this receiver.  Start from
+# the template in this repo and edit it for your hardware:
+cp gnss/refclock.example.conf gnss/refclock.conf
+$EDITOR gnss/refclock.conf
+timesync master --refclock-file gnss/refclock.conf --gps-device /dev/pps0 \
                 --advertise-gnss-quality
 
 # Ship gate for a production line:
 timesync verify
 ```
 
-The role is the command, and that is the whole interface. There is no separate
-install step, and no `install`/`switch` verb to choose between. `1` and `2` are still
-accepted wherever a role is expected, including as the command itself, and are
-normalised to the words before any message is built.
+The role is the command, and that is the whole interface. `1` and `2` are still accepted
+wherever a role is expected, including as the command itself, and are normalised to the
+words before any message is built.
 
 ## The GNSS recipe file
 
@@ -140,8 +142,10 @@ where this machine's GNSS receiver is. It is the one input the tool cannot write
 you, because it is a property of the receiver, not of the board — which device the
 receiver presents (`/dev/pps0`, a serial port reached through gpsd's SHM, a PHC index)
 and which parameters that model needs. Your file is installed verbatim as
-`/etc/chrony/conf.d/20-ptp-refclock.conf`. The tool checks two things about it and
-nothing else: that it is readable, and that it mentions the `--gps-device` you passed.
+`/etc/chrony/conf.d/20-ptp-refclock.conf`. The tool checks three things about it and
+nothing else: that it is readable, that it holds a `refclock` line, and that it mentions
+the `--gps-device` you passed. That last check is why a gpsd/SHM recipe — which names no
+serial port — should note the port in a comment; the template shows where.
 
 A receiver with a PPS output and gpsd-fed NMEA over SHM:
 
@@ -151,7 +155,12 @@ refclock SHM 0 refid GPS  precision 1e-1 offset 0.0 delay 0.2
 refclock PPS /dev/pps0 refid PPS  lock GPS prefer
 ```
 
-Where yours comes from:
+That file is not something you have to invent from nothing: this repo ships a
+commented copy of it as **`gnss/refclock.example.conf`**. Copy it, keep the lines that
+match your receiver, delete the rest, and fix the device names. The comments in it
+explain each line.
+
+Where the real values come from:
 
 1. **The receiver's documentation.** A GNSS module datasheet or manual normally
    carries a chrony or gpsd example for exactly that module; copy it, then correct the
@@ -554,9 +563,5 @@ Sep 16 18:02:35.403621 ubuntu phc2sys[2713]: [19.033] Waiting for ptp4l...
   hardcode the packaged config path and ship no `Restart=`. A future `linuxptp` package
   update to those units will not arrive; the files are short, so diff them after an
   upgrade if that matters.
-- **There is no `install` or `switch` verb.** A note written against version 1.1.0 may
-  say `timesync install slave` or `timesync switch master`. Both verbs are gone: the role
-  is the command. Typing one gets a one-line pointer to the new spelling rather than a
-  usage dump, so an operator with last month's instruction sheet is not left guessing.
 - **`CLOCK_REALTIME` has exactly one owner per role and mode.** That is the invariant to
   preserve when editing anything here.
