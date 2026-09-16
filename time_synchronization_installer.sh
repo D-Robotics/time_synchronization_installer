@@ -87,29 +87,32 @@
 # ---------------------------------------------------------------------------
 # TYPICAL USE
 #
-#   # new machine, fresh flash -- the slave role, one command.  This is
-#   # software time stamping (the default): no PTP hardware clock is involved,
-#   # accuracy is NTP-grade, and it works on any interface:
-#   sudo ./time_synchronization_installer.sh install slave
+#   # the role IS the command.  On a fresh machine this provisions it; on a
+#   # machine already running this tool it changes the role.  Nothing else to
+#   # remember.  Slave is software time stamping by default: no PTP hardware
+#   # clock is involved, accuracy is NTP-grade, and it works on any interface:
+#   sudo ./time_synchronization_installer.sh slave
 #
 #   # ... and the same, but taking its timestamps from the NIC's own clock
 #   # (only where the NIC and its driver really do hardware-stamp):
-#   sudo ./time_synchronization_installer.sh install slave --time-stamping hardware
+#   sudo ./time_synchronization_installer.sh slave --time-stamping hardware
 #
-#   # new machine, the master role, with a GNSS recipe validated on a bench unit:
-#   sudo ./time_synchronization_installer.sh install master \
+#   # the master role, on a machine with a GNSS recipe validated on a bench unit.
+#   # The recipe is a chrony snippet for this receiver -- see --refclock-file
+#   # under "options", and keep the reviewed file in your deployment repo:
+#   sudo ./time_synchronization_installer.sh master \
 #        --refclock-file ./gnss/refclock.conf --gps-device /dev/ttyS0 \
 #        --advertise-gnss-quality
 #
-#   # an already-provisioned board, in the field:
-#   sudo timesync slave          # or: sudo timesync switch slave
-#   sudo timesync master         # or: sudo timesync switch master
+#   # in the field, once installed to /usr/local/sbin/timesync:
+#   sudo timesync slave
+#   sudo timesync master
 #   sudo timesync status
 #   sudo timesync verify         # ship gate: exit 4 or 5 means DO NOT SHIP
 #
 #   # rehearse without touching the machine, then inspect what would be written:
-#   sudo ./time_synchronization_installer.sh --dry-run install slave
-#   ./time_synchronization_installer.sh --root /tmp/stage install slave \
+#   sudo ./time_synchronization_installer.sh --dry-run slave
+#   ./time_synchronization_installer.sh --root /tmp/stage slave \
 #        && find /tmp/stage -type f
 #
 #   (1 and 2 are still accepted wherever a role is expected -- see the
@@ -118,7 +121,7 @@
 
 set -euo pipefail
 
-VERSION=1.1.0
+VERSION=1.2.0
 
 # The one place the tool's names live.  NAME is the command an operator types
 # and the prefix on every message; SRCFILE is how this file refers to itself in
@@ -167,10 +170,6 @@ REFCLOCK_FILE=""
 GPS_DEVICE=""
 ADVERTISE_GNSS=0
 ADVERTISE_SET=0
-# Set by do_switch: a switch is a role change, not a re-provision, so the GNSS
-# side of the machine -- the recorded capability and the recipe file -- is left
-# alone.  Read by write_state and write_install_files.
-KEEP_GNSS=0
 ROOT=""
 DRY=0
 FORCE=0
@@ -227,24 +226,21 @@ and adds phc2sys only when --time-stamping hardware is in use:
                     time source.
 
 commands
-  install slave|master
-                    Provision this machine for the given role and start it.
-                    Converges: writes every config, unit and the switcher,
-                    then restarts only what changed.  Safe to re-run; a second
-                    run over an already-correct machine changes nothing.
-  switch slave|master
-                    Change the role of an ALREADY provisioned machine.  Refuses
-                    if `install` has not been run on this machine yet.
-                    Everything that is not the role carries over: the
-                    interface, the domain and transport, and -- for a board
-                    provisioned as a GNSS master -- the recipe file and the
-                    GNSS time quality, so `switch master` brings the grandmaster
-                    config back without the flags being repeated.  Only the
+  slave | master    The role, and the whole interface.  On a machine that is
+                    not provisioned yet the command installs everything and
+                    starts it; on a machine already running this tool it
+                    changes the role and nothing else.  Running the command for
+                    the role the machine is already in is a no-op.
+                    It converges rather than appends: every config, unit and
+                    the switcher are (re)written, and only what changed is
+                    restarted.  Everything that is not the role carries over --
+                    the interface, the domain and transport, the time-stamping
+                    mode, the GNSS recipe, and, for a board provisioned as a
+                    GNSS master, the GNSS time quality -- so the way back to
+                    `master` does not need the flags repeated.  Only the
                     role-dependent files, the role file and chrony's state are
-                    touched; the recipe is not, so a round trip is reversible.
-                    Unlike `install`, one of these files being missing is not
-                    a re-provision: a stale GNSS recipe is kept, not deleted.
-  slave | master    Shorthands for `switch slave` / `switch master`.
+                    touched; the recipe never is, so a round trip is
+                    reversible.
   status            Configured role, live state of every piece, recent ptp4l
                     output, current system clock.  Changes nothing.
   verify [slave|master]
@@ -307,18 +303,29 @@ options
                                      software it needs no phc2sys, but it does
                                      require NIC support and most drivers have
                                      dropped it (this board's refuses it).
-                         The mode is recorded and carried across `switch`; the
-                         install record is the authority, and `verify` reports
-                         what the running daemon actually bound.
+                         The mode is recorded and carried across a role change;
+                         the install record is the authority, and `verify`
+                         reports what the running daemon actually bound.
   --refclock-file F      master: a chrony snippet describing this machine's
-                         GNSS receiver (its refclock line, and a pps line if it
-                         has one).  Installed as /etc/chrony/conf.d/
-                         20-ptp-refclock.conf.  Validate one recipe on one
-                         bench unit, review it, then deploy that same reviewed
-                         file to the whole fleet.  Giving no recipe to
-                         `install` removes any recipe installed earlier, so
-                         what is on disk always matches the role just
-                         installed; `switch` keeps it (see above).
+                         GNSS receiver -- the refclock lines that tell chrony
+                         where the receiver is, e.g.
+                             refclock SHM 0 refid GPS precision 1e-1 offset 0.0
+                             refclock PPS /dev/pps0 refid PPS lock GPS prefer
+                         You get it from the receiver's documentation (then fix
+                         the device names for this board's wiring), or from
+                         /etc/chrony/conf.d/ on a bench unit where the same
+                         receiver already works.  Nothing is generated for you:
+                         it depends on the receiver model.  Installed verbatim
+                         as /etc/chrony/conf.d/20-ptp-refclock.conf; the only
+                         checks are that F is readable and that it mentions
+                         --gps-device.
+                         Validate one recipe on one bench unit (`chronyc
+                         sources -v`, `chronyc tracking`), review it, then
+                         deploy that same reviewed file to the whole fleet.
+                         A recipe already on the machine is kept: changing the
+                         role does not rewire the board, so an installed recipe
+                         stays until `uninstall` removes it.  To replace it
+                         without uninstalling, pass a new --refclock-file.
   --gps-device DEV       master, required with --refclock-file: the device the
                          receiver is on (/dev/ttyS0, /dev/pps0, ...).  Its
                          existence is checked, and F must mention DEV -- this
@@ -335,21 +342,20 @@ options
   --force                Override the checks that are judgement calls rather
                          than facts: a leftover ptp4l instance on another
                          interface, a --gps-device that does not exist yet, or
-                         a `master` install with no GNSS recipe at all (a
+                         a `master` run with no GNSS recipe at all (a
                          skeleton -- `verify` will keep returning 5).
   --root DIR             Stage the generated tree under DIR instead of /.  apt,
                          systemctl and every hardware probe are skipped, so the
-                         tree can be inspected on a laptop.  install and
-                         uninstall only.
+                         tree can be inspected on a laptop.  The role command
+                         and uninstall only.
   --dry-run              Print every action, change nothing.
 
 shorthands
-  1 and 2                Accepted anywhere a role is expected, and mean exactly
-                         `slave` and `master`.  The words are the interface;
-                         the digits are kept only so an older note that says
-                         "1" or "2" is still understood.  A bare `timesync 1`
-                         is refused rather than treated as a switch, so a typo
-                         cannot change the machine.
+  1 and 2                Accepted wherever a role is expected, including as the
+                         command itself, and mean exactly `slave` and `master`.
+                         The words are the interface; the digits are kept only
+                         so an older note that says "1" or "2" is still
+                         understood.
   -h | --help
   -V | --version
 EOF
@@ -576,15 +582,14 @@ write_state() {
   local path prev gq
   path="$(R "$STATE_FILE")"
   prev="$(state_get installed || true)"
-  # gnss_quality records a capability of the machine, not of the current role,
-  # so a `switch` to slave keeps it -- that is what lets `switch master` bring back
-  # the grandmaster config without the operator re-typing the recipe flags.
-  # Only KEEP_GNSS (set by do_switch) does this: a plain `install` is
-  # a full re-provision, and there the operator's flags are authoritative.
+  # gnss_quality records a capability of the machine, not of the current role.
+  # A board that goes to slave keeps the record, so a later `timesync master`
+  # brings the grandmaster config back without the recipe flags being retyped;
+  # the intent belongs to the machine, not to the role it happens to be in.
   # The state file has to be read before it is overwritten, hence reading it
-  # here rather than in the callers.
+  # here rather than in the caller.
   gq="$ADVERTISE_GNSS"
-  if [ "$KEEP_GNSS" = 1 ] && [ "$ROLE" != master ]; then
+  if [ "$ROLE" != master ]; then
     gq="$(state_get gnss_quality || true)"
     gq="${gq:-0}"
   fi
@@ -595,7 +600,11 @@ write_state() {
   mkdir -p "$(dirname "$path")"
   cat >"$path" <<EOF
 $MARK
-# What was installed, by which version.  Read by 'timesync status'.
+# What is provisioned on this machine, and by which version.  Read by
+# 'timesync status'.  installed is when the machine was first provisioned;
+# switched is when a role command last ran here (the two are the same on a
+# machine that has only ever been provisioned).  The role and the values under
+# it are the current ones.
 tool_version=$VERSION
 role=$ROLE
 iface=$IFACE
@@ -646,16 +655,16 @@ cat <<'PTPSVC_EOF'
 # ptp4l given two -f files DISCARDS the first, so a key set only there simply is
 # not in effect.  Measured on this board with `pmc 'GET DEFAULT_DATA_SET'` (a
 # domainNumber set in the first file read back as 0 from the running daemon).
-# Both role files are kept up to date by `timesync install|switch`; only the one
-# named in PTP4L_ARGS is read, and swapping roles swaps which one that is.
+# Both role files are kept up to date by `timesync slave|master`; only the one
+# named in PTP4L_ARGS is read, and changing the role changes which one that is.
 #
 # The active file is named in PTP4L_ARGS in /etc/default/ptp4l, which is
-# generated by `timesync install|switch`.  Do not hand-edit that file;
-# `timesync install` rewrites it.
+# generated by `timesync slave|master`.  Do not hand-edit that file; the role
+# command rewrites it.
 #
 # The transport and domain below are the ones this board runs on, whatever its
-# role.  To change them: `timesync install <role> --transport ... --domain ...`
-# (or on a provisioned board, `timesync switch <role> --transport ...`).
+# role.  To change them, give the flags to the role command:
+# `timesync master --transport ... --domain ...`.
 #
 
 [global]
@@ -728,8 +737,8 @@ cat <<'PTPSVC_EOF'
 # WITH NO TIME QUALITY SECTION BELOW THIS ROLE IS A SKELETON: the defaults
 # (clockClass 248, clockAccuracy 0xFE) mean "not a reference", which tells every
 # slave not to trust this clock as the root of the network.  The quality lines
-# come from `timesync install master --advertise-gnss-quality`, and `timesync
-# verify` refuses to pass until this board has both a GNSS reference and them.
+# come from `timesync master --advertise-gnss-quality`, and `timesync verify`
+# refuses to pass until this board has both a GNSS reference and them.
 #
 
 [global]
@@ -743,8 +752,7 @@ cat <<'PTPSVC_EOF'
 
 # ===========================================================================
 # Grandmaster time quality.  Present only in the master role, and only when
-# `timesync install master --advertise-gnss-quality` (or the same flags on
-# `switch`) was used.
+# `timesync master --advertise-gnss-quality` was used.
 #
 # These three lines are what make this board's clock selectable as the root of
 # the network.  They are only truthful when chrony is actually disciplined by a
@@ -783,7 +791,7 @@ cat <<'PTPSVC_EOF'
 # against /lib/systemd/system/ptp4l@.service after an upgrade if that matters.
 #
 # The config comes from PTP4L_ARGS in /etc/default/ptp4l, which
-# `timesync install|switch` generates.  PTP4L_ARGS is written unbraced on
+# `timesync slave|master` generates.  PTP4L_ARGS is written unbraced on
 # purpose: systemd splits an unbraced variable into separate arguments, which
 # is how both -f flags get through.  ${PTP4L_ARGS} would arrive as a single
 # argument and ptp4l would reject it.
@@ -1515,7 +1523,7 @@ do_verify() {
   role="$(env_get PTP_ROLE || true)"
   iface="$(env_get PTP_IFACE || true)"
   if [ -z "$role" ] || [ -z "$iface" ]; then
-    check_bad "no role configured in $ENV_FILE -- run 'timesync install slave' (or 'install master') first"
+    check_bad "no role configured in $ENV_FILE -- run 'timesync slave' (or 'timesync master') on this machine first"
     printf '\nverify: FAILED\n' >&2
     return 4
   fi
@@ -1755,7 +1763,7 @@ do_verify() {
     check_ok "GNSS reference recipe present ($REFCLOCK_DEST)"
 
     if [ "$ADVERTISE_GNSS" != 1 ]; then
-      check_bad "a GNSS reference is configured but the time quality is not advertised in $CONF_DIR/ptp4l-$role.conf; every slave would see 'not a reference' and refuse to lock onto this master.  Reinstall with --advertise-gnss-quality"
+      check_bad "a GNSS reference is configured but the time quality is not advertised in $CONF_DIR/ptp4l-$role.conf; every slave would see 'not a reference' and refuse to lock onto this master.  Re-run '$NAME master --advertise-gnss-quality'"
     else
       check_ok "grandmaster time quality advertised (clockClass 6 / accuracy 0x21 / GNSS)"
     fi
@@ -1872,14 +1880,13 @@ write_install_files() {  # writes every generated file; sets RESTART_NEEDED
     # treats it as a comment.  It is what makes ownership of the file -- and so
     # its removal on uninstall -- unambiguous.
     install_marked_copy "$REFCLOCK_FILE" "$REFCLOCK_DEST"
-  elif [ "$KEEP_GNSS" != 1 ]; then
-    # No recipe given and this is not a switch, so it is a full re-provision to
-    # a role that does not consume GNSS: drop a recipe left over from an
-    # earlier GNSS install, so what is on disk describes this board's actual
-    # wiring.  A `switch` deliberately keeps it -- switching back to master
-    # has to find the recipe still there.
-    remove_generated "$REFCLOCK_DEST"
   fi
+  # A recipe already on the machine is left alone when none is given.  The
+  # machine's wiring did not change just because its role did, and a board
+  # taken out of the master role and later put back has to find the recipe
+  # still there -- otherwise `timesync master` would need the flags again, or
+  # worse, would come up advertising time quality from a receiver nothing feeds.
+  # `uninstall` is what removes it.
 
   local self
   self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
@@ -1899,10 +1906,21 @@ daemon_reload_if_needed() {
   systemctl daemon-reload
 }
 
-do_install() {
-  local role_arg="$1"
+# Has this tool already been deployed on this machine?  Asked of the files
+# rather than of the state file: the files are what makes the machine work, and
+# a half-removed tree has to count as not provisioned (which is what makes the
+# command recover from an interrupted uninstall instead of refusing to run).
+provisioned() {
+  [ -r "$(R "$ENV_FILE")" ] && [ -r "$(R "$TOOL_DEST")" ] \
+    && [ -r "$(R "$UNIT_DIR/ptp4l@.service")" ] \
+    && [ -r "$(R "$CONF_DIR/ptp4l-slave.conf")" ]
+}
+
+do_role() {
+  local role_arg="$1" prev fresh=0
 
   ROLE_ARG="$role_arg"
+  provisioned || fresh=1
 
   if [ -z "$ROOT" ]; then
     apt_ensure            # first: interface detection needs ethtool
@@ -1910,6 +1928,55 @@ do_install() {
     say "--root $ROOT: staging only; apt, systemctl and hardware checks are skipped"
   fi
 
+  # Everything the machine is already doing carries over unless it is given
+  # explicitly: the interface, the transport and domain it was set up with, the
+  # time-stamping mode, and -- on a board that was serving GNSS -- the time
+  # quality it advertises.  Changing the role must not quietly reset any of it.
+  #
+  # This is a no-op on a fresh machine, because there is nothing recorded to
+  # carry over, which is why provisioning and re-roling are one command.
+  #
+  # GNSS quality is the one piece that needs care: it is a master-only
+  # attribute, and carrying it into slave makes preflight_args reject the very
+  # change back to slave ("--advertise-gnss-quality is master only"), which
+  # would strand a board that was serving GNSS.  So it is carried forward only
+  # when the target role is master; the intent survives in the state file
+  # either way, and the next `timesync master` picks it up again.
+  if [ "$fresh" != 1 ]; then
+    if [ "$role_arg" = master ] && [ "$ADVERTISE_SET" != 1 ]; then
+      prev="$(state_get gnss_quality || true)"
+      if [ "${prev:-0}" = 1 ]; then
+        ADVERTISE_GNSS=1
+        note "keeping GNSS time-quality advertising from the existing install"
+      fi
+    fi
+    if [ "$DOMAIN_SET" != 1 ]; then
+      prev="$(state_get domain || true)"
+      if [ -n "$prev" ] && [ "$prev" != "$DOMAIN" ]; then
+        DOMAIN="$prev"
+        note "keeping PTP domain $DOMAIN from the existing install"
+      fi
+    fi
+    if [ "$TRANSPORT_SET" != 1 ]; then
+      prev="$(state_get transport || true)"
+      if [ -n "$prev" ] && [ "$prev" != "$TRANSPORT" ]; then
+        TRANSPORT="$prev"
+        note "keeping transport $TRANSPORT from the existing install"
+      fi
+    fi
+    # Time stamping carries over like the rest, and it decides which units the
+    # new role needs, so it has to be settled before role_values() is called.
+    if [ "$TIME_STAMPING_SET" != 1 ]; then
+      prev="$(stamping_recorded)"
+      if [ -n "$prev" ] && [ "$prev" != "$TIME_STAMPING" ]; then
+        TIME_STAMPING="$prev"
+        note "keeping time stamping $TIME_STAMPING from the existing install"
+      fi
+    fi
+  fi
+
+  # The interface is resolved after the flags are settled, because a carried-over
+  # domain or mode can change which interfaces are acceptable.
   resolve_iface
   role_values "$role_arg"
   preflight_args
@@ -1917,7 +1984,17 @@ do_install() {
     preflight_machine
   fi
 
-  say "installing role $ROLE on $IFACE"
+  if [ "$fresh" = 1 ]; then
+    say "installing role $ROLE on $IFACE"
+  fi
+
+  # The role-dependent files are rewritten even when the machine is already
+  # provisioned.  They differ by role: a GNSS master carries clockClass /
+  # clockAccuracy in its config, and a board that was switched away from master
+  # while keeping those lines would be lying to every slave on the segment.
+  # This is also what makes --domain / --transport take effect on a re-role, and
+  # what repairs a unit or config file that was edited by hand.  Anything
+  # already correct reports "unchanged".
   write_install_files
 
   if [ -n "$ROOT" ]; then
@@ -1948,99 +2025,6 @@ do_install() {
     return 0
   fi
 
-  printf '\n'
-  do_verify "$role_arg"
-}
-
-do_switch() {
-  local role_arg="$1"
-
-  if [ ! -r "$ENV_FILE" ] || [ ! -r "$TOOL_DEST" ] \
-     || [ ! -r "$UNIT_DIR/ptp4l@.service" ] || [ ! -r "$CONF_DIR/ptp4l-slave.conf" ]; then
-    die 2 "this machine has not been provisioned yet -- run 'timesync install slave' (or 'install master') first"
-  fi
-
-  ROLE_ARG="$role_arg"
-  KEEP_GNSS=1
-
-  # A switch changes the ROLE and nothing else.  Everything else the machine
-  # was already doing -- the interface it runs on, the transport and domain it
-  # was installed with, whether it advertises GNSS quality -- carries over
-  # unless it is given explicitly.  Switching must never quietly reset the
-  # domain or demote a GNSS grandmaster to a skeleton.
-  #
-  # GNSS quality is the exception: it is a master-only attribute, and carrying
-  # it into slave makes preflight_args reject the very switch back to slave
-  # ("--advertise-gnss-quality is master only"), which would strand a board that
-  # was serving GNSS.  So it is carried forward only when the target role is
-  # master; the intent survives in the state file either way, and the next
-  # switch to master picks it up again.
-  local prev
-  case "$role_arg" in
-    master)
-      if [ "$ADVERTISE_SET" != 1 ]; then
-        prev="$(state_get gnss_quality || true)"
-        if [ "${prev:-0}" = 1 ]; then
-          ADVERTISE_GNSS=1
-          note "keeping GNSS time-quality advertising from the existing install"
-        fi
-      fi
-      ;;
-  esac
-  if [ "$DOMAIN_SET" != 1 ]; then
-    prev="$(state_get domain || true)"
-    if [ -n "$prev" ] && [ "$prev" != "$DOMAIN" ]; then
-      DOMAIN="$prev"
-      note "keeping PTP domain $DOMAIN from the existing install"
-    fi
-  fi
-  if [ "$TRANSPORT_SET" != 1 ]; then
-    prev="$(state_get transport || true)"
-    if [ -n "$prev" ] && [ "$prev" != "$TRANSPORT" ]; then
-      TRANSPORT="$prev"
-      note "keeping transport $TRANSPORT from the existing install"
-    fi
-  fi
-  # Time stamping carries over like the rest, and it decides which units the
-  # new role needs -- so it has to be settled before role_values() is called.
-  if [ "$TIME_STAMPING_SET" != 1 ]; then
-    prev="$(stamping_recorded)"
-    if [ -n "$prev" ] && [ "$prev" != "$TIME_STAMPING" ]; then
-      TIME_STAMPING="$prev"
-      note "keeping time stamping $TIME_STAMPING from the existing install"
-    fi
-  fi
-
-  resolve_iface
-  role_values "$role_arg"
-  preflight_args
-  preflight_machine
-
-  # The role-dependent config files have to be (re)written here, not only by
-  # `install`.  Switching to a GNSS master adds the clockClass/clockAccuracy
-  # lines to the master file, and switching away removes them -- a board left
-  # advertising GNSS quality it is no longer fed would be lying to every slave.
-  # This also makes --domain/--transport on a switch actually take effect, and
-  # keeps the unit files honest if one of them was edited by hand.  Everything
-  # already correct reports "unchanged".
-  write_install_files
-  if [ "$RESTART_NEEDED" = 1 ]; then
-    daemon_reload_if_needed
-  fi
-  role_values "$role_arg"      # write_install_files may have moved the target
-
-  apply_role
-  write_state
-
-  if [ "$DRY" = 1 ]; then
-    printf '\n'
-    say "dry run: nothing was changed, so there is nothing to verify"
-    return 0
-  fi
-
-  if [ "$NO_VERIFY" = 1 ]; then
-    return 0
-  fi
   printf '\n'
   do_verify "$role_arg"
 }
@@ -2120,26 +2104,33 @@ do_uninstall() {
 # ===========================================================================
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|switch|uninstall)
+    uninstall)
       [ -z "$CMD" ] || die 1 "more than one command given ('$CMD' and '$1')"
       CMD="$1"; shift ;;
+    install|switch)
+      # These were the interface before the role became the command.  Both
+      # spellings are refused with a pointer rather than a usage dump: someone
+      # with last month's note should be told what to type instead, not left to
+      # guess whether the tool is broken.
+      die 1 "'$1' is gone: the role is the command now -- '$NAME slave' or '$NAME master'" ;;
     status|verify)
       [ -z "$CMD" ] || die 1 "more than one command given ('$CMD' and '$1')"
       CMD="$1"; shift ;;
-    slave|master)
-      # `slave` and `master` are the way to spell the role, and what the word
-      # means depends on what came before it: after a command that takes a role
-      # it IS that role (`install slave`), while on its own it is the `switch`
-      # shorthand (`timesync master` == `timesync switch master`).
+    slave|master|1|2)
+      # The role IS the command: it provisions the machine when there is
+      # nothing there yet, and changes the role when there is.  After `verify`
+      # it is that command's argument instead (`verify slave`).
+      [ -z "$ROLE_ARG" ] || die 1 "role given twice ('$ROLE_ARG' and '$1')"
+      # Normalised before anything can report an error, so that every message --
+      # including the refusals just below -- prints the word rather than the
+      # digit.  The digit is the spelling people found hard to follow.
+      case "$1" in 1|slave) ROLE_ARG=slave ;; 2|master) ROLE_ARG=master ;; esac
       case "$CMD" in
-        install|switch|verify)
-          [ -z "$ROLE_ARG" ] || die 1 "role given twice ('$ROLE_ARG' and '$1')"
-          ROLE_ARG="$1"; shift ;;
-        "")
-          CMD="$1"; shift ;;
-        *)
-          die 1 "'$CMD' does not take a role" ;;
-      esac ;;
+        verify) ;;
+        "") CMD="$ROLE_ARG" ;;
+        *)  die 1 "'$CMD' does not take a role" ;;
+      esac
+      shift ;;
     wait-iface)
       [ -z "$CMD" ] || die 1 "more than one command given ('$CMD' and '$1')"
       [ $# -ge 2 ] || die 1 "wait-iface needs an interface name (usage: $NAME wait-iface <iface> [seconds])"
@@ -2158,22 +2149,6 @@ while [ $# -gt 0 ]; do
       else
         shift 2
       fi ;;
-    1|2)
-      # Kept as shorthands for `slave` and `master`.  Digits never stand in for
-      # a command, though: `timesync 1` was refused before this, and quietly
-      # turning it into a state-changing switch is a worse answer to a typo
-      # than refusing is.
-      [ -z "$ROLE_ARG" ] || die 1 "role given twice ('$ROLE_ARG' and '$1')"
-      # Normalised before anything can report an error, so that every message --
-      # including the refusals just below -- prints the word rather than the
-      # digit.  The digit is the spelling people found hard to follow.
-      case "$1" in 1) ROLE_ARG=slave ;; 2) ROLE_ARG=master ;; esac
-      case "$CMD" in
-        install|switch|verify) ;;
-        "") die 1 "role '$ROLE_ARG' needs a command: install $ROLE_ARG | switch $ROLE_ARG" ;;
-        *)  die 1 "'$CMD' does not take a role" ;;
-      esac
-      shift ;;
     [0-9]*)
       die 1 "unknown role '$1' (want: slave | master, or 1 | 2)" ;;
     --iface)         [ $# -ge 2 ] || die 1 "--iface needs a value"; IFACE_OPT="$2"; shift 2 ;;
@@ -2195,34 +2170,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$CMD" in
-  install|switch)
-    # ROLE_ARG is always the word by now -- the parser translates 1/2 on the
-    # way in -- so there is no digit case to allow for here.
-    case "$ROLE_ARG" in
-      slave|master) ;;
-      "") die 1 "$CMD needs a role: $CMD slave | $CMD master" ;;
-      *)  die 1 "unknown role '$ROLE_ARG' (want: slave | master)" ;;
-    esac
-    if [ -n "$ROOT" ] && [ "$CMD" = switch ]; then
-      die 1 "--root is for install and uninstall only; switch changes a live machine"
-    fi
-    ;;
-  verify)
-    if [ -n "$ROOT" ]; then
-      die 1 "--root is for install and uninstall only; verify inspects a live machine"
-    fi
-    ;;
-esac
+# ROLE_ARG is always the word by now -- the parser translates 1/2 on the way in
+# -- so nothing downstream has a digit case to allow for.
+if [ "$CMD" = verify ] && [ -n "$ROOT" ]; then
+  die 1 "--root is for the role command and uninstall only; verify inspects a live machine"
+fi
 
 case "$CMD" in
-  install)   do_install "$ROLE_ARG" ;;
-  switch)    do_switch "$ROLE_ARG" ;;
-  slave)     do_switch slave ;;
-  master)    do_switch master ;;
+  slave|master) do_role "$ROLE_ARG" ;;
   status)    do_status ;;
   verify)    do_verify "${ROLE_ARG:-}" ;;
   wait-iface) do_wait_iface "$WAIT_IFACE" "${WAIT_TIMEOUT:-30}" ;;
   uninstall) do_uninstall ;;
+  "")        usage; die 1 "no command given (the role is the command: $NAME slave | $NAME master)" ;;
   *)         usage; exit 2 ;;
 esac

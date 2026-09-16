@@ -47,7 +47,7 @@ failed to create a clock
 会；而且钟没被校的时候，`ps` 里能直接看到这个参数。`verify` 从三个方向核对模式：记录
 下来的值、unit 实际传的参数、以及运行中的 `ptp4l` 打开着哪些 `/dev/ptp*`。
 
-模式记在 `/var/lib/timesync/state` 里，`switch` 会带过去，所以 `timesync slave` 不会把它
+模式记在 `/var/lib/timesync/state` 里，改角色时会带过去，所以 `timesync slave` 不会把它
 重置掉。
 
 ## 两个角色
@@ -99,40 +99,78 @@ GNSS 接收机
 在板子上以 root 运行：
 
 ```sh
-# 跟随网络上的 PTP master，software 打时戳（默认）：
-./time_synchronization_installer.sh install slave
+# 跟随网络上的 PTP master，software 打时戳（默认）。
+# 机器还没配置过就装好并启动；已经跑着本工具就只改角色：
+./time_synchronization_installer.sh slave
 
 # 同上，但时戳取自带网卡时钟（板子得真的支持 hardware）：
-./time_synchronization_installer.sh install slave --time-stamping hardware
+./time_synchronization_installer.sh slave --time-stamping hardware
 
-# 之后把这块板子改成对外提供 GNSS 时间：
-timesync switch master --refclock-file ./my-gps.recipe --gps-device /dev/pps0 \
-                       --advertise-gnss-quality
+# 之后这块板子改成对外提供 GNSS 时间。只改角色，网口、模式等等都沿用。
+# ./gnss/refclock.conf 是给这台接收机写的配方，见下文"GNSS 配方文件"：
+timesync master --refclock-file ./gnss/refclock.conf --gps-device /dev/pps0 \
+                --advertise-gnss-quality
 
 # 产线出货门禁：
 timesync verify
 ```
 
-凡是预期给角色名的地方，就用 `slave` 和 `master` 这两个词写。`1` 和 `2` 仍然接受，并且
-在拼任何消息之前就换成词。单独一个 `timesync 1` 会被拒绝而不是当成切换，敲错不会改动
-机器。
+角色名就是命令，这就是全部接口。没有单独的安装步骤，也没有 `install`/`switch` 两个动词
+要选。`1` 和 `2` 仍然接受，连当命令本身也行，并且在拼任何消息之前就换成词。
+
+## GNSS 配方文件
+
+`--refclock-file` 收的是一段 **chrony 配置片段**：告诉 chrony 这台机器的 GNSS 接收机在哪
+儿的 `refclock` 行。这是本工具唯一没法替你写的东西，因为它取决于接收机而不是板子——接收机
+以什么形式出现（`/dev/pps0`、经 gpsd 走 SHM 的串口、某个 PHC 索引），以及那个型号需要什
+么参数。你的文件会原样装成 `/etc/chrony/conf.d/20-ptp-refclock.conf`。工具只检查两件事：
+文件读得出来，以及里面提到了你给的 `--gps-device`。
+
+一台带 PPS 输出、NMEA 经 gpsd 走 SHM 的接收机：
+
+```conf
+# gnss/refclock.conf -- <接收机型号> 的 chrony 片段，设备是 /dev/pps0
+refclock SHM 0 refid GPS  precision 1e-1 offset 0.0 delay 0.2
+refclock PPS /dev/pps0 refid PPS  lock GPS prefer
+```
+
+你的配方从哪儿来：
+
+1. **接收机的文档。** GNSS 模块的数据手册或说明书里通常就有针对该模块的 chrony 或 gpsd
+   示例，抄下来，再把设备名改成这块板子的接法。
+2. **已经在用这台接收机的样机。** 如果哪台机器的 chrony 已经靠它校时，那台机器的
+   `/etc/chrony/conf.d/` 里就是配方，把文件拿走即可。这个来源更可靠，因为它是被你的驱动栈
+   验证过能跑的，而不是只被厂商验证过。
+
+上批量之前在**一台样机**上验证。两个问题：chrony 认得这个参考源吗，系统时钟真的跟着它走
+吗？
+
+```sh
+chronyc sources -v      # 参考源出现，reachability 是 377
+chronyc tracking        # Reference ID 变成该参考源，Offset 收敛到 µs 级
+```
+
+然后用工具把关：master 没有 GNSS 参考源时 `timesync verify` 返回 5，一旦 chrony 锁上你的
+接收机就不再返回 5。把评审过的配方提交进部署仓库——产线出货的是那个文件，不是模块数据手
+册，这样全队机器拿到的是同一份评审过的字节。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `install slave\|master` | 把这台机器配置成该角色并启动。收敛式：写好所有配置、unit 和切换器，然后只重启真正变了的。可以重复跑，对已经正确的机器再跑一次什么都不改。 |
-| `switch slave\|master` | 切换一台**已经配置过**的机器的角色。没跑过 `install` 就拒绝。 |
-| `slave` \| `master` | `switch slave` / `switch master` 的简写。 |
+| `slave` \| `master` | **角色名，也是全部接口。** 机器还没配置过就装好并启动；已经跑着本工具就只改角色，别的一律不动。对机器已经在跑的那个角色再敲一次，什么都不改。 |
 | `status` | 当前角色、时间戳模式、每一件的实时状态、最近的 `ptp4l` 输出、当前系统时间。不改任何东西。 |
 | `verify [slave\|master]` | 产线门禁。检查角色配置文件、unit 传给守护进程的参数、该模式需要的每个 unit 是否 active **且** enabled（不需要的是否确实不在）、每个进程实际运行的 argv、`ptp4l` 到底打开了哪个钟、以及 `chrony` 的状态。不改任何东西。 |
 | `uninstall` | 停下并删掉本工具装的一切，并把之前被它关掉的 NTP unit 恢复回去。`linuxptp` 包本身不动。 |
 | `wait-iface IFACE [seconds]` | 等 `IFACE` 处于管理 up。这是生成的 unit 的 `ExecStartPre`，不是给运维敲的。见[下文](#为什么-unit-要跑-timesync-wait-iface)。 |
 
-`switch` 只改角色。网口、domain、transport、时间戳模式全部沿用。对配置成 GNSS master
-的板子，GNSS 配方文件和 GNSS 质量也沿用，所以 `switch master` 不用把参数再敲一遍就能把
-grandmaster 配置找回来。`install` 不一样，它是权威的：不给配方就删掉以前装过的配方，磁盘
-上的东西始终与刚装的角色一致。
+角色命令是收敛而不是追加：所有配置、unit 和切换器都重写一遍，只重启真正变了的，所以对
+已经正确的机器再跑一次什么都不改。
+
+角色以外的一切都沿用。网口、domain、transport、时间戳模式全部照旧。对配置成 GNSS master
+的板子，GNSS 配方文件和 GNSS 质量也沿用，所以 `timesync master` 不用把参数再敲一遍就能
+把 grandmaster 配置找回来。配方不会被改角色删掉——板子接线不会因为改角色而变——要清掉它
+用 `uninstall`，或者传一个新的 `--refclock-file` 换掉。
 
 ## 参数
 
@@ -142,13 +180,13 @@ grandmaster 配置找回来。`install` 不一样，它是权威的：不给配�
 | `--domain N` | `domainNumber`，0–127（默认 0）。 |
 | `--transport T` | `UDPv4` \| `UDPv6` \| `L2`（默认 `UDPv4`）。 |
 | `--time-stamping MODE` | `software` \| `hardware` \| `legacy`（默认 `software`）。`ptp4l` 在哪里打时戳，见[上文](#时间戳模式)。 |
-| `--refclock-file F` | `master`：一段 chrony 配置，描述这台机器的 GNSS 接收机（它的 `refclock` 行，有 PPS 就再加一行）。装成 `/etc/chrony/conf.d/20-ptp-refclock.conf`。 |
+| `--refclock-file F` | `master`：一段 chrony 配置，描述这台机器的 GNSS 接收机（它的 `refclock` 行，有 PPS 就再加一行）。内容是什么、从哪儿来见[GNSS 配方文件](#gnss-配方文件)。原样装成 `/etc/chrony/conf.d/20-ptp-refclock.conf`。 |
 | `--gps-device DEV` | `master`，配 `--refclock-file` 时必给：接收机所在的设备（`/dev/ttyS0`、`/dev/pps0` …）。会检查它是否存在，**并且**要求 `F` 里提到 `DEV`，这能拦住把配方贴到接法不同的机器上。 |
 | `--advertise-gnss-quality` | `master`，配 GNSS 配方时必给：让 `ptp4l` 宣告 `clockClass 6`、accuracy `0x21`、`timeSource GNSS`。 |
 | `--no-apt` | 不调 `apt`；缺包就直接在预检失败。 |
 | `--no-verify` | 跳过安装后的 verify。此时退出码 0 只表示"步骤跑过了"，不表示"可以出货"。 |
-| `--force` | 越过那些属于判断而非事实的检查：另一个网口上残留的 `ptp4l` 实例、还不存在的 `--gps-device`、以及完全没有 GNSS 配方的 `master` 安装。 |
-| `--root DIR` | 把生成的树摆到 `DIR` 而不是 `/`。`apt`、`systemctl` 和所有硬件探测都跳过，所以可以在笔记本上直接看这棵树。只对 `install` 和 `uninstall` 有效。 |
+| `--force` | 越过那些属于判断而非事实的检查：另一个网口上残留的 `ptp4l` 实例、还不存在的 `--gps-device`、以及完全没有 GNSS 配方的 `master` 运行。 |
+| `--root DIR` | 把生成的树摆到 `DIR` 而不是 `/`。`apt`、`systemctl` 和所有硬件探测都跳过，所以可以在笔记本上直接看这棵树。只对角色命令和 `uninstall` 有效。 |
 | `--dry-run` | 打印每一步动作，什么都不改。 |
 
 ## 退出码
@@ -177,11 +215,11 @@ grandmaster 配置找回来。`install` 不一样，它是权威的：不给配�
 | `/etc/systemd/system/phc2sys@.service` | 总是；覆盖系统包里的那个，但只在 hardware 模式下启用 |
 | `/etc/default/ptp4l` | 总是；**角色和模式都在这里** |
 | `/usr/local/sbin/timesync` | 总是；工具本身，以短命令形式 |
-| `/var/lib/timesync/state` | 总是；装了些什么、哪个版本装的 |
+| `/var/lib/timesync/state` | 总是；这台机器配了什么、哪个版本配的 |
 | `/var/lib/timesync/disabled-ntp-units` | 被关掉的时钟守护进程清单，`uninstall` 靠它恢复 |
 
-两个角色的配置总是都写，`/etc/default/ptp4l` 里的 `-f` 列表只选其中一个。所以切换不依赖
-于"先删掉旧的"，切回去也一定能找到另一个文件。
+两个角色的配置总是都写，`/etc/default/ptp4l` 里的 `-f` 列表只选其中一个。所以改角色不依
+赖于"先删掉旧的"，切回去也一定能找到另一个文件。
 
 unit 文件里除了 `EnvironmentFile=/etc/default/ptp4l` 和守护进程自己的参数，不含任何 PTP
 知识：
@@ -196,7 +234,7 @@ ExecStartPre=/usr/local/sbin/timesync wait-iface %I
 ExecStart=/usr/sbin/phc2sys -w $PHC2SYS_ARGS
 ```
 
-所以切换就是重写一个小文件再重启守护进程。不改 unit，不做 enable/disable 折腾。
+所以改角色就是重写一个小文件再重启守护进程。不改 unit，不做 enable/disable 折腾。
 `$PTP4L_ARGS` 故意不带花括号：systemd 会把不带花括号的变量拆成多个参数，写成
 `${PTP4L_ARGS}` 会变成一个参数，`ptp4l` 直接拒绝。
 
@@ -209,8 +247,8 @@ ExecStart=/usr/sbin/phc2sys -w $PHC2SYS_ARGS
 
 本工具更早的版本传的是 `-f ptp4l-common.conf -f ptp4l-<role>.conf`，于是整个公共文件被
 忽略，`--domain` 和 `--transport` 静悄悄地什么都不做。当时的部署看起来是对的，只是因为
-那几个值恰好等于 `ptp4l` 的默认值。现在每个角色一个自包含文件，并且 `install` 和
-`switch` 会删掉旧布局留下的那两个文件，避免磁盘上有没人读的配置。
+那几个值恰好等于 `ptp4l` 的默认值。现在每个角色一个自包含文件，并且角色命令会删掉旧布
+局留下的那两个文件，避免磁盘上有没人读的配置。
 
 ## 为什么 unit 要跑 `timesync wait-iface`
 
@@ -252,10 +290,10 @@ netdev 注册时就 active，这块板子上大约是 3.5 秒，仍然远早于 
 以下全部来自 D-Robotics X5 板子，Ubuntu 22.04.5 aarch64，systemd 249.11，linuxptp
 3.1.1，网口 `eth0`，局域网上没有 PTP master。
 
-### 全新安装，software 打时戳
+### 全新机器首次配置，software 打时戳
 
 ```
-# timesync install slave
+# timesync slave
           interface from the existing /etc/default/ptp4l: eth0
           time stamping: software (the NIC also advertises hardware timestamping; that is not proof it works)
 timesync: installing role slave on eth0
@@ -330,12 +368,12 @@ System clock now: 2026-09-16T19:18:07+08:00
 意味着这块板子不会去当 master，所以永远不会有 `master offset` 行。网络上有真 master
 时，这些行会被每秒一条的 `master offset` 取代。
 
-### 在 1.0.0 装过的板子上 `switch master`
+### 在 1.0.0 装过的板子上改成 `master`
 
 1.0.0 不记录时间戳模式，所以模式从 unit 实际运行的参数里取回来。不会有角色被顺带改掉：
 
 ```
-$ timesync switch master --force --dry-run
+$ timesync master --force --dry-run
           keeping time stamping hardware from the existing install
           interface from the existing /etc/default/ptp4l: eth0
           time stamping: hardware; PTP hardware clock: /dev/ptp0
@@ -364,9 +402,9 @@ timesync: dry run: nothing was changed, so there is nothing to verify
 把那些 `would` 行当成一组读：换角色就是*启用 chrony*、*重写 `/etc/default/ptp4l`*、
 *重启*，外加清理旧布局留下的那个文件。
 
-### `switch slave --time-stamping hardware`
+### 改回 `slave` 并加 `--time-stamping hardware`
 
-把模式切回去会重新启用 `phc2sys`，两个守护进程都起来：
+把模式改回去会重新启用 `phc2sys`，两个守护进程都起来：
 
 ```
 role slave on eth0, time stamping hardware
@@ -476,5 +514,9 @@ Sep 16 18:02:35.403621 ubuntu phc2sys[2713]: [19.033] Waiting for ptp4l...
   `/lib/systemd/system/` 下的那份，这里是必需的：包里的 unit 把配置路径写死了，而且没有
   `Restart=`。代价是以后 `linuxptp` 包更新那两个 unit 时不会生效；文件很短，如果在意的
   话，升级后 diff 一下。
+- **没有 `install`，也没有 `switch` 这两个动词了。** 照着 1.1.0 写的说明可能还写着
+  `timesync install slave` 或 `timesync switch master`。两个动词都取消了：角色名就是命令。
+  敲下去会得到一行指向新写法的提示，而不是一整屏 usage，所以手里拿着上个月说明书的现场
+  人员不用猜是不是工具坏了。
 - **每个角色、每种模式下 `CLOCK_REALTIME` 只有一个属主。** 改这里任何东西时，这条不变量
   要守住。

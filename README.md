@@ -54,7 +54,7 @@ what you see in `ps` when a clock is not being corrected. `verify` checks the mo
 three directions: the recorded value, the arguments the unit passes, and the `/dev/ptp*`
 descriptors the running `ptp4l` holds open.
 
-The mode is recorded in `/var/lib/timesync/state` and carried across `switch`, so
+The mode is recorded in `/var/lib/timesync/state` and carried across a role change, so
 `timesync slave` does not reset it.
 
 ## The two roles
@@ -101,7 +101,7 @@ advertise.
 
 A `master` without the GNSS quality lines is a skeleton. The defaults
 (`clockClass 248`, `clockAccuracy 0xFE`) mean "not a reference", so no slave will lock
-onto it. Those lines are added only when the install is given a GNSS recipe plus
+onto it. Those lines are added only when the command is given a GNSS recipe plus
 `--advertise-gnss-quality`, and `verify` returns 5 for a master missing either.
 
 ## Quick start
@@ -109,44 +109,91 @@ onto it. Those lines are added only when the install is given a GNSS recipe plus
 On the board, as root:
 
 ```sh
-# Follow a PTP master on this network, software stamping (the default):
-./time_synchronization_installer.sh install slave
+# Follow a PTP master on this network, software stamping (the default).
+# On a machine that is not provisioned yet this installs and starts everything;
+# on one that already runs this tool it changes the role:
+./time_synchronization_installer.sh slave
 
 # The same, but taking timestamps from the NIC clock, on a board that really
 # hardware-stamps:
-./time_synchronization_installer.sh install slave --time-stamping hardware
+./time_synchronization_installer.sh slave --time-stamping hardware
 
-# Later, switch this board to serve GNSS time instead:
-timesync switch master --refclock-file ./my-gps.recipe --gps-device /dev/pps0 \
-                       --advertise-gnss-quality
+# Later, this board serves GNSS time instead.  The role is the only thing that
+# changes; the interface, the mode and the rest carry over.  ./gnss/refclock.conf
+# is your snippet for this receiver -- see "The GNSS recipe file" below:
+timesync master --refclock-file ./gnss/refclock.conf --gps-device /dev/pps0 \
+                --advertise-gnss-quality
 
 # Ship gate for a production line:
 timesync verify
 ```
 
-`slave` and `master` are the spelling everywhere a role is expected. `1` and `2` are
-still accepted and are normalised to the words before any message is built. A bare
-`timesync 1` is refused rather than treated as a switch, so a typo cannot change the
-machine.
+The role is the command, and that is the whole interface. There is no separate
+install step, and no `install`/`switch` verb to choose between. `1` and `2` are still
+accepted wherever a role is expected, including as the command itself, and are
+normalised to the words before any message is built.
+
+## The GNSS recipe file
+
+`--refclock-file` takes a **chrony snippet**: the `refclock` lines that tell chrony
+where this machine's GNSS receiver is. It is the one input the tool cannot write for
+you, because it is a property of the receiver, not of the board — which device the
+receiver presents (`/dev/pps0`, a serial port reached through gpsd's SHM, a PHC index)
+and which parameters that model needs. Your file is installed verbatim as
+`/etc/chrony/conf.d/20-ptp-refclock.conf`. The tool checks two things about it and
+nothing else: that it is readable, and that it mentions the `--gps-device` you passed.
+
+A receiver with a PPS output and gpsd-fed NMEA over SHM:
+
+```conf
+# gnss/refclock.conf -- chrony snippet for <receiver model> on /dev/pps0
+refclock SHM 0 refid GPS  precision 1e-1 offset 0.0 delay 0.2
+refclock PPS /dev/pps0 refid PPS  lock GPS prefer
+```
+
+Where yours comes from:
+
+1. **The receiver's documentation.** A GNSS module datasheet or manual normally
+   carries a chrony or gpsd example for exactly that module; copy it, then correct the
+   device names for this board's wiring.
+2. **A bench unit where the receiver already works.** If chrony is already disciplining
+   from it somewhere, that machine's `/etc/chrony/conf.d/` holds the recipe — take the
+   file. This is the more reliable of the two, because it is known to work with your
+   driver stack rather than with the vendor's.
+
+Validate it on one bench unit before it reaches the fleet. Two questions: does chrony
+see the reference, and does the system clock follow it?
+
+```sh
+chronyc sources -v      # the refclock appears with a reachability of 377
+chronyc tracking        # "Reference ID" is the refclock; Offset settles to µs
+```
+
+Then let the tool gate it: `timesync verify` returns 5 while a master has no GNSS
+reference, and stops doing so once chrony is locked to yours. Commit the reviewed recipe
+to your deployment repo — that file, not the module datasheet, is what production ships,
+so the whole fleet gets the same reviewed bytes.
 
 ## Commands
 
 | command | what it does |
 |---|---|
-| `install slave\|master` | Provision this machine for the role and start it. Converges: writes every config, unit and the switcher, then restarts only what changed. Safe to re-run; a second run over an already-correct machine changes nothing. |
-| `switch slave\|master` | Change the role of an **already provisioned** machine. Refuses if `install` has not run yet. |
-| `slave` \| `master` | Shorthands for `switch slave` / `switch master`. |
+| `slave` \| `master` | **The role, and the whole interface.** On a machine that is not provisioned yet the command installs everything and starts it; on a machine already running this tool it changes the role and nothing else. Running the command for the role the machine is already in is a no-op. |
 | `status` | Configured role, time-stamping mode, live state of every piece, recent `ptp4l` output, current system clock. Changes nothing. |
 | `verify [slave\|master]` | The production-line gate. Checks the role file, the arguments the units pass to each daemon, every unit the mode needs active **and** enabled (and the ones it does not need absent), the live argv of each process, which clock `ptp4l` actually opened, and `chrony`'s state. Changes nothing. |
 | `uninstall` | Stop and remove everything this tool installed, and re-enable the NTP units it had disabled. The `linuxptp` package itself is left in place. |
 | `wait-iface IFACE [seconds]` | Wait until `IFACE` is administratively up. This is the `ExecStartPre` of the generated units, not something an operator runs. See [below](#why-the-units-run-timesync-wait-iface). |
 
-`switch` changes the role and nothing else. The interface, the domain, the transport and
-the time-stamping mode all carry over. For a board provisioned as a GNSS master, so do
-the recipe file and the GNSS time quality, which is what lets `switch master` bring the
-grandmaster config back without repeating the flags. A plain `install` is authoritative
-instead: giving it no recipe removes any recipe installed earlier, so what is on disk
-always matches the role just installed.
+The role command converges rather than appends: every config, unit and the switcher are
+(re)written, and only what changed is restarted, so a second run over an already-correct
+machine changes nothing.
+
+Everything that is not the role carries over. The interface, the domain, the transport
+and the time-stamping mode all do. For a board provisioned as a GNSS master, so do the
+recipe file and the GNSS time quality, which is what lets `timesync master` bring the
+grandmaster config back without repeating the flags. The recipe is never removed by a
+role change — the wiring on the board does not change when its role does — so `uninstall`
+is what clears it, or pass a new `--refclock-file` to replace it.
 
 ## Options
 
@@ -156,13 +203,13 @@ always matches the role just installed.
 | `--domain N` | `domainNumber`, 0–127 (default 0). |
 | `--transport T` | `UDPv4` \| `UDPv6` \| `L2` (default `UDPv4`). |
 | `--time-stamping MODE` | `software` \| `hardware` \| `legacy` (default `software`). Which clock `ptp4l` stamps in, as described [above](#time-stamping). |
-| `--refclock-file F` | `master`: a chrony snippet describing this machine's GNSS receiver (its `refclock` line, and a `pps` line if it has one). Installed as `/etc/chrony/conf.d/20-ptp-refclock.conf`. |
+| `--refclock-file F` | `master`: a chrony snippet describing this machine's GNSS receiver (its `refclock` lines, and a `pps` line if it has one). See [The GNSS recipe file](#the-gnss-recipe-file) for what it contains and where to get it. Installed verbatim as `/etc/chrony/conf.d/20-ptp-refclock.conf`. |
 | `--gps-device DEV` | `master`, required with `--refclock-file`: the device the receiver is on (`/dev/ttyS0`, `/dev/pps0`, …). Its existence is checked **and** `F` must mention `DEV`, which catches a recipe pasted onto a differently wired unit. |
 | `--advertise-gnss-quality` | `master`, required with a GNSS recipe: have `ptp4l` announce `clockClass 6`, accuracy `0x21`, `timeSource GNSS`. |
 | `--no-apt` | Never call `apt`; fail the preflight instead if a package is missing. |
 | `--no-verify` | Skip the post-install verify. Exit 0 then means only "the apply steps ran", not "the unit is fit to ship". |
-| `--force` | Override the checks that are judgement calls rather than facts: a leftover `ptp4l` instance on another interface, a `--gps-device` that does not exist yet, or a `master` install with no GNSS recipe at all. |
-| `--root DIR` | Stage the generated tree under `DIR` instead of `/`. `apt`, `systemctl` and every hardware probe are skipped, so the tree can be inspected on a laptop. `install` and `uninstall` only. |
+| `--force` | Override the checks that are judgement calls rather than facts: a leftover `ptp4l` instance on another interface, a `--gps-device` that does not exist yet, or a `master` run with no GNSS recipe at all. |
+| `--root DIR` | Stage the generated tree under `DIR` instead of `/`. `apt`, `systemctl` and every hardware probe are skipped, so the tree can be inspected on a laptop. The role command and `uninstall` only. |
 | `--dry-run` | Print every action, change nothing. |
 
 ## Exit codes
@@ -191,12 +238,12 @@ fit, and honest about being a GNSS-less skeleton.
 | `/etc/systemd/system/phc2sys@.service` | always, shadows the packaged unit; enabled only in hardware mode |
 | `/etc/default/ptp4l` | always; **the role and the mode live here** |
 | `/usr/local/sbin/timesync` | always; the tool itself, as the short command |
-| `/var/lib/timesync/state` | always; what was installed, by which version |
+| `/var/lib/timesync/state` | always; what is provisioned here, and by which version |
 | `/var/lib/timesync/disabled-ntp-units` | the ledger of clock daemons turned off, so `uninstall` can put them back |
 
 Both role configs are always written, and the `-f` list in `/etc/default/ptp4l` selects
-exactly one. A switch therefore never depends on a removal having happened first, and
-switching back is guaranteed to find the other file.
+exactly one. A role change therefore never depends on a removal having happened first,
+and changing back is guaranteed to find the other file.
 
 The unit files carry no PTP knowledge beyond `EnvironmentFile=/etc/default/ptp4l` and
 the daemon's own arguments:
@@ -211,7 +258,7 @@ ExecStartPre=/usr/local/sbin/timesync wait-iface %I
 ExecStart=/usr/sbin/phc2sys -w $PHC2SYS_ARGS
 ```
 
-So switching rewrites one small file and restarts the daemons. No unit edit, no
+So a role change rewrites one small file and restarts the daemons. No unit edit, no
 enable/disable churn. `$PTP4L_ARGS` is written unbraced on purpose: systemd splits an
 unbraced variable into separate arguments, and `${PTP4L_ARGS}` would arrive as one
 argument that `ptp4l` rejects.
@@ -227,8 +274,8 @@ inside a single file do accumulate, including across two `[global]` sections.
 An earlier version of this tool passed `-f ptp4l-common.conf -f ptp4l-<role>.conf`, so
 the whole common file was ignored and `--domain` and `--transport` silently did nothing.
 The deployment looked correct only because those values happened to match `ptp4l`'s
-defaults. Each role therefore now gets one self-contained file, and `install` and
-`switch` delete the two files the old layout used so nothing on disk is read by nobody.
+defaults. Each role therefore now gets one self-contained file, and the role command
+deletes the two files the old layout used so nothing on disk is read by nobody.
 
 ## Why the units run `timesync wait-iface`
 
@@ -274,10 +321,10 @@ unplugged board still comes up armed instead of wedging.
 All of the following was captured on a D-Robotics X5 board running Ubuntu 22.04.5
 aarch64, systemd 249.11, linuxptp 3.1.1, `eth0`, with no PTP master present on the LAN.
 
-### A fresh install, software stamping
+### Provisioning a fresh machine, software stamping
 
 ```
-# timesync install slave
+# timesync slave
           interface from the existing /etc/default/ptp4l: eth0
           time stamping: software (the NIC also advertises hardware timestamping; that is not proof it works)
 timesync: installing role slave on eth0
@@ -354,13 +401,13 @@ network. `slaveOnly 1` means the board will not take the master role, so no
 `master offset` line ever appears. On a network with a real master those lines are
 replaced by a `master offset` line once a second.
 
-### `switch master` on a board installed by version 1.0.0
+### Changing the role to `master`, on a board installed by version 1.0.0
 
 Version 1.0.0 recorded no time-stamping mode, so the mode is recovered from the
 arguments the units are actually running with. Nothing changes role by accident:
 
 ```
-$ timesync switch master --force --dry-run
+$ timesync master --force --dry-run
           keeping time stamping hardware from the existing install
           interface from the existing /etc/default/ptp4l: eth0
           time stamping: hardware; PTP hardware clock: /dev/ptp0
@@ -389,9 +436,9 @@ timesync: dry run: nothing was changed, so there is nothing to verify
 Read the `would` lines as a group. Changing the role is *enable chrony*, *rewrite
 `/etc/default/ptp4l`*, *restart*, and one cleanup of the file the old layout left behind.
 
-### `switch slave --time-stamping hardware`
+### Back to `slave` with `--time-stamping hardware`
 
-Switching the mode back re-enables `phc2sys` and both daemons come up:
+Changing the mode back re-enables `phc2sys` and both daemons come up:
 
 ```
 role slave on eth0, time stamping hardware
@@ -437,7 +484,7 @@ verify: FAILED
 
 The interface capability check passes, because this NIC advertises hardware timestamping.
 Only the daemon refuses the mode, which is why `verify` checks the running process and
-not just the advertised capabilities. Switching back to `hardware` recovers in one
+not just the advertised capabilities. Changing back to `hardware` recovers in one
 command.
 
 ### Boot, before and after the gate
@@ -507,5 +554,9 @@ Sep 16 18:02:35.403621 ubuntu phc2sys[2713]: [19.033] Waiting for ptp4l...
   hardcode the packaged config path and ship no `Restart=`. A future `linuxptp` package
   update to those units will not arrive; the files are short, so diff them after an
   upgrade if that matters.
+- **There is no `install` or `switch` verb.** A note written against version 1.1.0 may
+  say `timesync install slave` or `timesync switch master`. Both verbs are gone: the role
+  is the command. Typing one gets a one-line pointer to the new spelling rather than a
+  usage dump, so an operator with last month's instruction sheet is not left guessing.
 - **`CLOCK_REALTIME` has exactly one owner per role and mode.** That is the invariant to
   preserve when editing anything here.
